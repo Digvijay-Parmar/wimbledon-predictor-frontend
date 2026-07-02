@@ -356,38 +356,82 @@ export default function App() {
   const getTennisAbstractUrl = (name) =>
     `https://www.tennisabstract.com/cgi-bin/player.cgi?p=${name.replace(/\s+/g, '')}`;
 
-  // Auto-fetch ML predictions when a round loads.
-  // Waits until the saved-results load above has finished, so it doesn't
-  // fire predict() calls against the blank initial bracket and then get
-  // wiped out a moment later when the saved data arrives.
+  // Track which match predictions we've already requested, so re-renders
+  // (which happen on every setTournament call, including the one triggered
+  // by each prediction response coming back) don't re-fire duplicate fetches
+  // for a match that's already in-flight or already resolved.
+  const requestedPredictionsRef = useRef(new Set());
+
+  // Fetch ML predictions for EVERY match across ALL seven rounds — not just
+  // whichever tab happens to be open — as soon as the saved bracket data has
+  // finished loading. This also naturally picks up newly created matches,
+  // e.g. when an admin marks a winner and the next round's slot gets a
+  // player populated for the first time.
+  //
+  // Previously this only looped over tournament[activeRound], so rounds you
+  // never clicked into stayed stuck at myProb1 === null forever, which threw
+  // off the per-round and global "MODEL correct" counters versus IBM's.
+  //
+  // IMPORTANT: this deliberately awaits each fetch in sequence (for...of +
+  // await) rather than firing all of them in a .forEach. A .forEach loop
+  // would kick off every match's fetch on the same tick — up to ~64
+  // simultaneous POSTs on first load — which is enough concurrent load to
+  // choke a Render free-tier instance and come back as a wave of 500s.
+  // Awaiting each request in turn queues them one at a time instead, which
+  // the backend can handle comfortably at the cost of a slightly slower
+  // (but reliable) full load.
   useEffect(() => {
     if (currentView !== 'bracket' || !isLoaded) return;
 
-    tournament[activeRound].forEach((match, idx) => {
-      // Only fetch if we have players and probabilities are still null
-      if (match.player1 && match.player2 && match.myProb1 === null) {
-       fetch(`${API_BASE_URL}/api/predict`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ p1: match.player1.name, p2: match.player2.name })
-        })
-        .then(res => res.json())
-        .then(data => {
-          setTournament(prev => {
-            const ns = { ...prev };
-            // Safety check: ensure the round and index exist
-            if (ns[activeRound] && ns[activeRound][idx]) {
-              ns[activeRound] = ns[activeRound].map(m => ({ ...m }));
-              ns[activeRound][idx].myProb1 = data.p1_prob;
-              ns[activeRound][idx].myProb2 = data.p2_prob;
+    const fetchPendingPredictions = async () => {
+      for (const round of ROUNDS) {
+        for (let idx = 0; idx < tournament[round.id].length; idx++) {
+          const match = tournament[round.id][idx];
+          const key = `${round.id}-${idx}`;
+
+          // Only fetch if both players are known, we don't have a
+          // prediction yet, and we haven't already asked for this one.
+          if (
+            match.player1 &&
+            match.player2 &&
+            match.myProb1 === null &&
+            !requestedPredictionsRef.current.has(key)
+          ) {
+            // Lock it immediately so a later pass of this effect (e.g.
+            // triggered by the setTournament call below) doesn't re-request it.
+            requestedPredictionsRef.current.add(key);
+
+            try {
+              const res = await fetch(`${API_BASE_URL}/api/predict`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ p1: match.player1.name, p2: match.player2.name })
+              });
+
+              const data = await res.json();
+
+              setTournament(prev => {
+                const ns = { ...prev };
+                // Safety check: ensure the round and index still exist
+                if (ns[round.id] && ns[round.id][idx]) {
+                  ns[round.id] = ns[round.id].map(m => ({ ...m }));
+                  ns[round.id][idx].myProb1 = data.p1_prob;
+                  ns[round.id][idx].myProb2 = data.p2_prob;
+                }
+                return ns;
+              });
+            } catch (err) {
+              console.error("Prediction fetch error:", err);
+              // Unlock it so it can be retried on a later pass.
+              requestedPredictionsRef.current.delete(key);
             }
-            return ns;
-          });
-        })
-        .catch(err => console.error("Prediction fetch error:", err));
+          }
+        }
       }
-    });
-  }, [activeRound, isLoaded, currentView]);
+    };
+
+    fetchPendingPredictions();
+  }, [tournament, isLoaded, currentView]);
 
   // Persist a single match's data to the backend database
   const saveMatch = (roundId, matchIndex, payload) => {
@@ -428,6 +472,9 @@ export default function App() {
       nextMatch.actualWinnerId = null;
       clearFutureRounds(state, nextRoundKey, nextMatchIndex);
     }
+    // Also free up the prediction-request lock for the cleared match so it
+    // can be re-fetched correctly if it gets repopulated later.
+    requestedPredictionsRef.current.delete(`${nextRoundKey}-${nextMatchIndex}`);
   };
 
   const toggleWinner = (roundId, matchIndex, clickedPlayer) => {
@@ -455,6 +502,9 @@ export default function App() {
           nextMatch.myProb1 = null; nextMatch.myProb2 = null;
           nextMatch.ibmProb1 = null; nextMatch.ibmProb2 = null;
           nextMatch.actualWinnerId = null;
+          // New pairing in the next round — clear its prediction lock so
+          // the effect above will fetch a fresh prediction for it.
+          requestedPredictionsRef.current.delete(`${nextRoundKey}-${nextMatchIndex}`);
         }
         // Persist: save winner to database
         saveMatch(roundId, matchIndex, { winner_id: clickedPlayer.id });
@@ -489,6 +539,7 @@ export default function App() {
       });
     });
     setTournament(buildInitialTournament());
+    requestedPredictionsRef.current.clear();
     setIsSaved(false);
     setActiveRound('r128');
     setShowResetConfirm(false);
