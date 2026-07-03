@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Trophy, Info, Eye, EyeOff, CheckCircle2, Circle, ExternalLink, Target, Cpu, Activity, Database, Lock, Heart } from 'lucide-react';
+import { Trophy, Info, Eye, EyeOff, CheckCircle2, Circle, ExternalLink, Target, Cpu, Activity, Database, Lock, Heart, Search, X, Users } from 'lucide-react';
 
 // --- ADMIN PASSWORD ---
 const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD;
@@ -163,6 +163,20 @@ const NATION_TO_ISO2 = {
   SVK:"sk"
 };
 
+// Full country names, used for the nation search (so users can type
+// "Spain" instead of only the 3-letter code "ESP").
+const NATION_NAMES = {
+  ITA: "Italy", SRB: "Serbia", POR: "Portugal", USA: "United States",
+  AUS: "Australia", PER: "Peru", ESP: "Spain", GBR: "Great Britain",
+  CAN: "Canada", JPN: "Japan", NOR: "Norway", POL: "Poland",
+  AUT: "Austria", KOR: "South Korea", FRA: "France", GER: "Germany",
+  ARG: "Argentina", CRO: "Croatia", RUS: "Russia", KAZ: "Kazakhstan",
+  PAR: "Paraguay", COL: "Colombia", HUN: "Hungary", CZE: "Czech Republic",
+  BRA: "Brazil", GRE: "Greece", CHN: "China", NED: "Netherlands",
+  CHI: "Chile", BUL: "Bulgaria", SUI: "Switzerland", BEL: "Belgium",
+  BIH: "Bosnia and Herzegovina", FIN: "Finland", LTU: "Lithuania", SVK: "Slovakia"
+};
+
 const NationBadge = ({ nation }) => {
   const iso2 = NATION_TO_ISO2[nation];
   const [failed, setFailed] = useState(false);
@@ -189,13 +203,15 @@ const NationBadge = ({ nation }) => {
   );
 };
 
-// Tennis ball icon for the header
-const TennisBallIcon = ({ size = 22 }) => (
-  <svg width={size} height={size} viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <circle cx="16" cy="16" r="15" fill="#D9E021" stroke="#FFFFFF" strokeWidth="1.5" />
-    <path d="M16 1c-3 5-3 10 0 15 3 5 3 10 0 15" stroke="#FFFFFF" strokeWidth="1.6" fill="none" />
-    <path d="M2.2 11c4.6 2.6 9.3 2.6 13.8 0M30.8 21c-4.6-2.6-9.3-2.6-13.8 0" stroke="#FFFFFF" strokeWidth="1.4" fill="none" />
-  </svg>
+// Official Wimbledon logo, used in the header (replaces the old tennis-ball icon)
+const WimbledonLogo = ({ size = 26 }) => (
+  <img
+    src="https://www.wimbledon.com/_next/static/media/Logo-Wimbledon-44px.2wyelfplbl7j4.svg?dpl=v0_115_2"
+    alt="Wimbledon"
+    width={size}
+    height={size}
+    className="shrink-0"
+  />
 );
 
 // --- Password Modal ---
@@ -324,6 +340,29 @@ const applySavedResults = (savedData) => {
   return state;
 };
 
+// Figures out which round the tournament is "currently" on, so that's the
+// round the user lands on when they open the site — instead of always
+// dumping them back on Round 128. Logic: walk the rounds in order; the
+// "current" round is the last one that has at least one decided match. If
+// that round is now fully decided (every match has a winner), the action
+// has moved on to the next round, so bump forward one. Falls back to r128
+// if nothing has been decided yet.
+const computeCurrentRound = (state) => {
+  let current = 'r128';
+  for (const round of ROUNDS) {
+    const matches = state[round.id];
+    const anyDecided = matches.some(m => m.actualWinnerId !== null);
+    if (!anyDecided) continue;
+    const allDecided = matches.every(m => m.actualWinnerId !== null);
+    current = round.id;
+    if (allDecided) {
+      const nextIdx = ROUND_KEYS.indexOf(round.id) + 1;
+      if (nextIdx < ROUND_KEYS.length) current = ROUND_KEYS[nextIdx];
+    }
+  }
+  return current;
+};
+
 // ─── Main App ────────────────────────────────────────────────────────────────
 export default function App() {
   const [isAdmin, setIsAdmin] = useState(false);
@@ -332,25 +371,55 @@ export default function App() {
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [activeRound, setActiveRound] = useState('r128');
   const [currentView, setCurrentView] = useState('bracket');
+  const [visitorCount, setVisitorCount] = useState(null);
+
+  // --- Search state ---
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [searchSelection, setSearchSelection] = useState(null); // { type: 'player' | 'nation', value }
+  const searchBoxRef = useRef(null);
 
   const activeRoundObj = ROUNDS.find(r => r.id === activeRound);
+  const getRoundObj = (roundId) => ROUNDS.find(r => r.id === roundId);
 
   const [tournament, setTournament] = useState(buildInitialTournament);
   const [isLoaded, setIsLoaded] = useState(false);
 
   // Load persisted winners and IBM probabilities from the database on page load,
   // then replay them through the whole bracket so every later round is
-  // correctly populated too. Runs once on mount.
+  // correctly populated too. Runs once on mount. Also jumps the user
+  // straight to whichever round the tournament is currently on.
   useEffect(() => {
    fetch(`${API_BASE_URL}/api/get-all-matches`)
       .then(res => res.json())
       .then(savedData => {
-        setTournament(applySavedResults(savedData));
+        const rebuilt = applySavedResults(savedData);
+        setTournament(rebuilt);
+        setActiveRound(computeCurrentRound(rebuilt));
       })
       .catch(err => {
         console.error('Failed to load saved matches:', err);
       })
       .finally(() => setIsLoaded(true));
+  }, []);
+
+  // Record + fetch the site visit counter once per page load.
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/api/visit-count`, { method: 'POST' })
+      .then(res => res.json())
+      .then(data => setVisitorCount(data.count))
+      .catch(err => console.error('Failed to record visit:', err));
+  }, []);
+
+  // Close the search suggestions dropdown when clicking outside of it.
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (searchBoxRef.current && !searchBoxRef.current.contains(e.target)) {
+        setShowSuggestions(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
   const getTennisAbstractUrl = (name) =>
@@ -477,8 +546,11 @@ export default function App() {
     requestedPredictionsRef.current.delete(`${nextRoundKey}-${nextMatchIndex}`);
   };
 
+  // NOTE: no longer gated on `isSaved` — admins can keep editing results
+  // after hitting Save. Save is now just a "confirm this is synced" action,
+  // not a lock (see handleSave below).
   const toggleWinner = (roundId, matchIndex, clickedPlayer) => {
-    if (!isAdmin || !clickedPlayer || isSaved) return;
+    if (!isAdmin || !clickedPlayer) return;
     setTournament(prev => {
       const newState = { ...prev };
       ROUNDS.forEach(r => { newState[r.id] = newState[r.id].map(m => ({ ...m })); });
@@ -522,9 +594,14 @@ export default function App() {
     }
   };
 
-  // Lock in all current results — disables further editing until reset
+  // Every change is already persisted live via saveMatch(), so "Save" here
+  // is just a quick visual confirmation flash — it does NOT lock the
+  // bracket. It used to set a permanent isSaved flag that disabled every
+  // input for the rest of the session; now it just flashes a "Saved" state
+  // for a couple seconds and admins can keep editing right away.
   const handleSave = () => {
     setIsSaved(true);
+    setTimeout(() => setIsSaved(false), 2000);
   };
 
   // Wipe everything back to the blank initial draw and unlock editing.
@@ -566,6 +643,197 @@ export default function App() {
     return { globalMyCorrect, globalIbmCorrect, globalTotal, roundStats };
   }, [tournament]);
 
+  // --- Search suggestions (players + nations matching the typed query) ---
+  const searchSuggestions = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return { players: [], nations: [] };
+    const players = rawPlayers
+      .filter(p => p.name.toLowerCase().includes(q))
+      .slice(0, 6);
+    const nations = Object.keys(NATION_NAMES)
+      .filter(code => code.toLowerCase().includes(q) || NATION_NAMES[code].toLowerCase().includes(q))
+      .slice(0, 6);
+    return { players, nations };
+  }, [searchQuery]);
+
+  const selectPlayerSearch = (player) => {
+    setSearchSelection({ type: 'player', value: player });
+    setSearchQuery(player.name);
+    setShowSuggestions(false);
+    setCurrentView('bracket');
+  };
+
+  const selectNationSearch = (code) => {
+    setSearchSelection({ type: 'nation', value: code });
+    setSearchQuery(NATION_NAMES[code]);
+    setShowSuggestions(false);
+    setCurrentView('bracket');
+  };
+
+  const clearSearch = () => {
+    setSearchSelection(null);
+    setSearchQuery('');
+    setShowSuggestions(false);
+  };
+
+  // Reusable match-card renderer, shared between the normal single-round
+  // bracket view and the per-round search results view.
+  const renderMatchCard = (m, i, roundId) => {
+    const roundObj = getRoundObj(roundId);
+    return (
+      <div key={i} className="bg-white p-4 border rounded-lg shadow-sm">
+        {/* Card header */}
+        <div className="flex justify-between text-xs text-gray-500 mb-2">
+          <span className="font-medium">Match {m.matchNo}</span>
+          <a
+            href={getSlamtrackerUrl(roundObj.roundNum, m.matchNo)}
+            target="_blank" rel="noreferrer"
+            className="flex items-center gap-1 text-emerald-600 hover:underline"
+          >
+            Match Center <ExternalLink size={11} />
+          </a>
+        </div>
+
+        {/* Column labels */}
+        <div className="flex justify-end gap-4 text-[10px] font-semibold uppercase tracking-wide pr-1 mb-1">
+          <span className="text-emerald-700 w-9 text-center">Model</span>
+          <span className="text-amber-600 w-12 text-center">IBM</span>
+        </div>
+
+        {/* Players */}
+        {[
+          { p: m.player1, probMy: m.myProb1, probIbm: m.ibmProb1, isP1: true },
+          { p: m.player2, probMy: m.myProb2, probIbm: m.ibmProb2, isP1: false }
+        ].map(({ p, probMy, isP1 }) => {
+          const isWinner = !!p && m.actualWinnerId === p.id;
+          const displayIbm = isP1 ? m.ibmProb1 : m.ibmProb2;
+          const isSearchHighlight = searchSelection && p && (
+            (searchSelection.type === 'player' && searchSelection.value.id === p.id) ||
+            (searchSelection.type === 'nation' && searchSelection.value === p.nation)
+          );
+          return (
+            <div
+              key={isP1 ? 'p1' : 'p2'}
+              className={`flex items-center justify-between gap-2 p-2 my-1 border rounded transition ${
+                isWinner ? 'bg-emerald-100 border-emerald-400' : isSearchHighlight ? 'bg-amber-50 border-amber-300' : 'border-gray-200'
+              }`}
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                {isAdmin && p && (
+                  <button
+                    type="button"
+                    onClick={() => toggleWinner(roundId, i, p)}
+                    title={isWinner ? 'Unmark winner' : 'Mark as winner'}
+                    className="shrink-0 transition text-emerald-600 hover:text-emerald-800"
+                  >
+                    {isWinner ? <CheckCircle2 size={18} /> : <Circle size={18} />}
+                  </button>
+                )}
+                {p && <NationBadge nation={p.nation} />}
+                {p ? (
+                  <a
+                    href={getTennisAbstractUrl(p.name)}
+                    target="_blank" rel="noreferrer"
+                    onClick={e => e.stopPropagation()}
+                    className={`font-medium text-sm truncate hover:underline ${isWinner ? 'text-emerald-800' : 'text-gray-800'}`}
+                  >
+                    {p.name}
+                  </a>
+                ) : (
+                  <span className="font-medium text-sm text-gray-400">TBD</span>
+                )}
+                {p?.seed && (
+                  <span className="text-[10px] bg-gray-100 text-gray-500 rounded px-1.5 py-0.5 shrink-0">
+                    #{p.seed}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex gap-4 text-xs font-bold shrink-0">
+                <span className={`w-9 text-center ${probMy !== null && probMy >= 50 ? 'text-emerald-700' : 'text-gray-400'}`}>
+                  {probMy !== null ? `${probMy}%` : '--'}
+                </span>
+                {isAdmin ? (
+                  <input
+                    type="number"
+                    value={isP1 ? (m.ibmProb1 ?? '') : (m.ibmProb2 ?? '')}
+                    onChange={e => {
+                      const v = Number(e.target.value || 0);
+                      updateIbmProb(roundId, i, isP1 ? v : 100 - v);
+                    }}
+                    className="w-12 border rounded text-center py-0.5 text-amber-700"
+                    placeholder="--"
+                  />
+                ) : (
+                  <span className="w-12 text-center text-amber-600">
+                    {displayIbm !== null ? `${displayIbm}%` : '--'}
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  // Renders the per-round breakdown when a search (player or nation) is active.
+  const renderSearchResults = () => (
+    <div className="space-y-8">
+      <div className="flex items-center justify-between bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
+        <div className="text-sm text-amber-800">
+          Showing results for{' '}
+          <span className="font-semibold">
+            {searchSelection.type === 'player' ? searchSelection.value.name : NATION_NAMES[searchSelection.value]}
+          </span>
+          {searchSelection.type === 'nation' && (
+            <span className="text-amber-600"> ({searchSelection.value})</span>
+          )}
+          {' '}across every round.
+        </div>
+        <button
+          onClick={clearSearch}
+          className="flex items-center gap-1 text-xs font-semibold text-amber-800 bg-amber-100 hover:bg-amber-200 rounded px-3 py-1.5 transition"
+        >
+          <X size={13} /> Clear search
+        </button>
+      </div>
+
+      {ROUNDS.map(round => {
+        const matches = tournament[round.id]
+          .map((m, idx) => ({ m, idx }))
+          .filter(({ m }) => {
+            if (searchSelection.type === 'nation') {
+              return (m.player1 && m.player1.nation === searchSelection.value) ||
+                     (m.player2 && m.player2.nation === searchSelection.value);
+            }
+            if (searchSelection.type === 'player') {
+              return (m.player1 && m.player1.id === searchSelection.value.id) ||
+                     (m.player2 && m.player2.id === searchSelection.value.id);
+            }
+            return false;
+          });
+
+        return (
+          <div key={round.id}>
+            <h3 className="text-sm font-bold text-emerald-900 mb-2">{round.name}</h3>
+            {matches.length === 0 ? (
+              <p className="text-xs text-gray-400 italic bg-gray-50 border border-dashed border-gray-200 rounded-lg px-4 py-3">
+                {searchSelection.type === 'nation'
+                  ? `No player from ${NATION_NAMES[searchSelection.value]} is playing in ${round.name}.`
+                  : `${searchSelection.value.name} is not playing in ${round.name}.`}
+              </p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {matches.map(({ m, idx }) => renderMatchCard(m, idx, round.id))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
       {/* Admin password modal */}
@@ -579,8 +847,8 @@ export default function App() {
       {/* Header */}
       <header className="bg-emerald-900 text-white p-4 shadow-lg sticky top-0 z-50">
         <div className="max-w-7xl mx-auto flex flex-wrap justify-between items-center gap-3">
-          <div className="flex items-center gap-2 cursor-pointer" onClick={() => setCurrentView('bracket')}>
-            <TennisBallIcon size={26} />
+          <div className="flex items-center gap-2 cursor-pointer" onClick={() => { setCurrentView('bracket'); clearSearch(); }}>
+            <WimbledonLogo size={26} />
             <div>
               <h1 className="text-lg font-bold leading-tight">Wimbledon Predictor</h1>
               <p className="text-[11px] text-emerald-300 leading-tight">Live ML Dashboard</p>
@@ -612,6 +880,14 @@ export default function App() {
                 </span>
               </div>
             </div>
+            <div className="w-px h-6 bg-emerald-700" />
+            <div className="text-center flex items-center gap-1">
+              <Users size={12} className="text-emerald-300" />
+              <div>
+                <div className="text-emerald-300">SITE VISITS</div>
+                <div className="font-bold text-sm">{visitorCount !== null ? visitorCount : '--'}</div>
+              </div>
+            </div>
           </div>
 
           <div className="flex gap-2">
@@ -641,7 +917,7 @@ export default function App() {
         {currentView === 'about' ? (
           <div className="max-w-3xl mx-auto mt-10 mb-16 p-8 bg-white rounded-lg shadow space-y-5 leading-relaxed text-gray-700">
             <h2 className="text-2xl font-bold text-emerald-900 flex items-center gap-2">
-              <TennisBallIcon size={24} /> About This Project
+              <WimbledonLogo size={24} /> About This Project
             </h2>
             <p>
               The Wimbledon Predictor is a live dashboard that forecasts the outcome of every match across 
@@ -690,155 +966,122 @@ Let's see if I can beat them.
         ) : (
           <main className="max-w-7xl mx-auto p-4">
             {isAdmin && (
-              <div className={`mb-4 text-sm rounded px-4 py-2 flex items-center gap-2 border ${
-                isSaved
-                  ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
-                  : 'bg-amber-50 border-amber-300 text-amber-800'
-              }`}>
+              <div className="mb-4 text-sm rounded px-4 py-2 flex items-center gap-2 border bg-amber-50 border-amber-300 text-amber-800">
                 <Lock size={14} />
                 {isSaved
-                  ? 'Results are saved and locked. Click Reset to start over.'
+                  ? 'Saved — you can keep editing any time.'
                   : 'Admin mode active — click a player\'s circle to mark them as the match winner. Click it again to undo.'}
               </div>
             )}
 
-            {/* Round tabs */}
-            <div className="flex gap-2 overflow-x-auto mb-6 pb-1">
-              {ROUNDS.map(r => {
-                const rs = stats.roundStats[r.id];
-                return (
+            {/* Search bar */}
+            <div className="relative mb-6" ref={searchBoxRef}>
+              <div className="relative">
+                <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={e => { setSearchQuery(e.target.value); setShowSuggestions(true); if (!e.target.value) setSearchSelection(null); }}
+                  onFocus={() => { if (searchQuery) setShowSuggestions(true); }}
+                  placeholder="Search by player name or country..."
+                  className="w-full border rounded-lg pl-9 pr-9 py-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-300 border-gray-300 bg-white shadow-sm"
+                />
+                {searchQuery && (
                   <button
-                    key={r.id}
-                    onClick={() => setActiveRound(r.id)}
-                    className={`px-4 py-2 rounded-lg shrink-0 text-left transition ${
-                      activeRound === r.id
-                        ? 'bg-emerald-600 text-white shadow'
-                        : 'bg-white border text-gray-700 hover:border-emerald-400'
-                    }`}
+                    onClick={clearSearch}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
                   >
-                    <div className="text-sm font-semibold">{r.name}</div>
-                    <div className={`text-[10px] ${activeRound === r.id ? 'text-emerald-100' : 'text-gray-400'}`}>
-                      MODEL: {rs.myC}/{rs.t} &middot; IBM: {rs.ibmC}/{rs.t}
-                    </div>
+                    <X size={16} />
                   </button>
-                );
-              })}
+                )}
+              </div>
+
+              {showSuggestions && (searchSuggestions.players.length > 0 || searchSuggestions.nations.length > 0) && (
+                <div className="absolute z-40 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-80 overflow-y-auto">
+                  {searchSuggestions.players.length > 0 && (
+                    <div>
+                      <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Players</div>
+                      {searchSuggestions.players.map(p => (
+                        <button
+                          key={p.id}
+                          onClick={() => selectPlayerSearch(p)}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-emerald-50 text-left"
+                        >
+                          <NationBadge nation={p.nation} />
+                          <span className="text-gray-800">{p.name}</span>
+                          {p.seed && <span className="text-[10px] text-gray-400 ml-auto">#{p.seed}</span>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {searchSuggestions.nations.length > 0 && (
+                    <div>
+                      <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Countries</div>
+                      {searchSuggestions.nations.map(code => (
+                        <button
+                          key={code}
+                          onClick={() => selectNationSearch(code)}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-emerald-50 text-left"
+                        >
+                          <NationBadge nation={code} />
+                          <span className="text-gray-800">{NATION_NAMES[code]}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
-            {/* Match cards */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {tournament[activeRound].map((m, i) => (
-                <div key={i} className="bg-white p-4 border rounded-lg shadow-sm">
-                  {/* Card header */}
-                  <div className="flex justify-between text-xs text-gray-500 mb-2">
-                    <span className="font-medium">Match {m.matchNo}</span>
-                    <a
-                      href={getSlamtrackerUrl(activeRoundObj.roundNum, m.matchNo)}
-                      target="_blank" rel="noreferrer"
-                      className="flex items-center gap-1 text-emerald-600 hover:underline"
-                    >
-                      Match Center <ExternalLink size={11} />
-                    </a>
-                  </div>
-
-                  {/* Column labels */}
-                  <div className="flex justify-end gap-4 text-[10px] font-semibold uppercase tracking-wide pr-1 mb-1">
-                    <span className="text-emerald-700 w-9 text-center">Model</span>
-                    <span className="text-amber-600 w-12 text-center">IBM</span>
-                  </div>
-
-                  {/* Players */}
-                  {[
-                    { p: m.player1, probMy: m.myProb1, probIbm: m.ibmProb1, isP1: true },
-                    { p: m.player2, probMy: m.myProb2, probIbm: m.ibmProb2, isP1: false }
-                  ].map(({ p, probMy, probIbm, isP1 }) => {
-                    const isWinner = !!p && m.actualWinnerId === p.id;
-                    const displayIbm = isP1 ? m.ibmProb1 : m.ibmProb2;
+            {searchSelection ? (
+              renderSearchResults()
+            ) : (
+              <>
+                {/* Round tabs */}
+                <div className="flex gap-2 overflow-x-auto mb-6 pb-1">
+                  {ROUNDS.map(r => {
+                    const rs = stats.roundStats[r.id];
+                    const myPct = rs.t > 0 ? Math.round(rs.myC / rs.t * 100) : 0;
+                    const ibmPct = rs.t > 0 ? Math.round(rs.ibmC / rs.t * 100) : 0;
                     return (
-                      <div
-                        key={isP1 ? 'p1' : 'p2'}
-                        className={`flex items-center justify-between gap-2 p-2 my-1 border rounded transition ${
-                          isWinner ? 'bg-emerald-100 border-emerald-400' : 'border-gray-200'
+                      <button
+                        key={r.id}
+                        onClick={() => setActiveRound(r.id)}
+                        className={`px-4 py-2 rounded-lg shrink-0 text-left transition ${
+                          activeRound === r.id
+                            ? 'bg-emerald-600 text-white shadow'
+                            : 'bg-white border text-gray-700 hover:border-emerald-400'
                         }`}
                       >
-                        <div className="flex items-center gap-2 min-w-0">
-                          {isAdmin && p && (
-                            <button
-                              type="button"
-                              onClick={() => toggleWinner(activeRound, i, p)}
-                              title={isSaved ? 'Results locked — reset to edit' : isWinner ? 'Unmark winner' : 'Mark as winner'}
-                              disabled={isSaved}
-                              className={`shrink-0 transition ${isSaved ? 'opacity-40 cursor-not-allowed text-gray-400' : 'text-emerald-600 hover:text-emerald-800'}`}
-                            >
-                              {isWinner ? <CheckCircle2 size={18} /> : <Circle size={18} />}
-                            </button>
-                          )}
-                          {p && <NationBadge nation={p.nation} />}
-                          {p ? (
-                            <a
-                              href={getTennisAbstractUrl(p.name)}
-                              target="_blank" rel="noreferrer"
-                              onClick={e => e.stopPropagation()}
-                              className={`font-medium text-sm truncate hover:underline ${isWinner ? 'text-emerald-800' : 'text-gray-800'}`}
-                            >
-                              {p.name}
-                            </a>
-                          ) : (
-                            <span className="font-medium text-sm text-gray-400">TBD</span>
-                          )}
-                          {p?.seed && (
-                            <span className="text-[10px] bg-gray-100 text-gray-500 rounded px-1.5 py-0.5 shrink-0">
-                              #{p.seed}
-                            </span>
-                          )}
+                        <div className="text-sm font-semibold">{r.name}</div>
+                        <div className={`text-[10px] whitespace-nowrap ${activeRound === r.id ? 'text-emerald-100' : 'text-gray-400'}`}>
+                          MODEL: {rs.myC}/{rs.t} ({myPct}%) &middot; IBM: {rs.ibmC}/{rs.t} ({ibmPct}%)
                         </div>
-
-                        <div className="flex gap-4 text-xs font-bold shrink-0">
-                          <span className={`w-9 text-center ${probMy !== null && probMy >= 50 ? 'text-emerald-700' : 'text-gray-400'}`}>
-                            {probMy !== null ? `${probMy}%` : '--'}
-                          </span>
-                          {isAdmin ? (
-                            <input
-                              type="number"
-                              value={isP1 ? (m.ibmProb1 ?? '') : (m.ibmProb2 ?? '')}
-                              onChange={e => {
-                                const v = Number(e.target.value || 0);
-                                updateIbmProb(activeRound, i, isP1 ? v : 100 - v);
-                              }}
-                              disabled={isSaved}
-                              className={`w-12 border rounded text-center py-0.5 text-amber-700 ${isSaved ? 'opacity-40 cursor-not-allowed bg-gray-50' : ''}`}
-                              placeholder="--"
-                            />
-                          ) : (
-                            <span className="w-12 text-center text-amber-600">
-                              {displayIbm !== null ? `${displayIbm}%` : '--'}
-                            </span>
-                          )}
-                        </div>
-                      </div>
+                      </button>
                     );
                   })}
                 </div>
-              ))}
-            </div>
+
+                {/* Match cards */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {tournament[activeRound].map((m, i) => renderMatchCard(m, i, activeRound))}
+                </div>
+              </>
+            )}
+
           {/* Save / Reset sticky bar — only visible in admin mode */}
           {isAdmin && (
             <div className="sticky bottom-0 left-0 right-0 mt-8 bg-white border-t shadow-lg z-40">
               <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
                 <p className="text-sm text-gray-500">
                   {isSaved
-                    ? '✅ All results are saved and locked.'
-                    : 'Make your changes, then save to lock them in.'}
+                    ? '✅ Synced. Keep making changes any time — everything saves automatically.'
+                    : 'Every change saves automatically. Hit Save any time for a quick confirmation.'}
                 </p>
                 <div className="flex gap-3">
                   <button
                     onClick={handleSave}
-                    disabled={isSaved}
-                    className={`flex items-center gap-2 px-5 py-2 rounded-lg font-semibold text-sm transition ${
-                      isSaved
-                        ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                        : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow'
-                    }`}
+                    className="flex items-center gap-2 px-5 py-2 rounded-lg font-semibold text-sm transition bg-emerald-600 hover:bg-emerald-500 text-white shadow"
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
